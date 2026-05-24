@@ -35,7 +35,7 @@ describe("LNS optimize", () => {
 
   test("late-game preset: 0 hard unsatisfied and all rooms contiguous", async () => {
     const layout = createLateGameVanillaLayout();
-    const result = await optimize(layout, { iterations: 500 });
+    const result = await optimize(layout, { iterations: 1000, restarts: 3 });
     const report = computeCost(result.layout);
 
     const unsatHard = report.linkReports.filter((r) => !r.satisfied && r.hard);
@@ -57,4 +57,31 @@ describe("LNS optimize", () => {
     }
     expect(fragmented).toEqual([]);
   }, 120000);
+
+  test("late-game preset: robust over 10 runs — 0 hard unsatisfied EVERY run", async () => {
+    // Variance test: optimizer is stochastic but the hard-link guarantee
+    // must hold every single run. Anything weaker (e.g. "passes on average")
+    // is not acceptable — a hard link means "must be adjacent".
+    const N = 10;
+    const failedRuns: Array<{ run: number; energy: number; unsat: string[] }> = [];
+    for (let run = 0; run < N; run += 1) {
+      const layout = createLateGameVanillaLayout();
+      const result = await optimize(layout, { iterations: 1000, restarts: 3 });
+      const report = computeCost(result.layout);
+      const unsatHard = report.linkReports.filter((r) => !r.satisfied && r.hard);
+      if (unsatHard.length > 0) {
+        const byId = new Map(result.layout.rooms.map((r) => [r.id, r.name]));
+        failedRuns.push({
+          run,
+          energy: Math.round(result.energy),
+          unsat: unsatHard.map((u) => `${byId.get(u.a)} <-> ${byId.get(u.b)}`),
+        });
+      }
+    }
+    if (failedRuns.length > 0) {
+      // eslint-disable-next-line no-console
+      console.log(`${failedRuns.length}/${N} runs failed:`, failedRuns);
+    }
+    expect(failedRuns).toEqual([]);
+  }, 600000);
 });
