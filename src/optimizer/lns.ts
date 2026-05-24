@@ -81,11 +81,11 @@ export async function optimize(initial: Layout, opts: LnsOptions = {}): Promise<
     }
   }
 
-  // --- Greedy polish: deterministic 2-swap pass --------------------------
+  // --- Greedy polish: deterministic 2-swap + 3-cycle passes --------------
   const polished = greedyPolish(globalBest);
-  if (polished.swaps > 0) {
+  if (polished.swaps > 0 || polished.threeCycles > 0) {
     globalBestEnergy = computeCost(globalBest).energy.total;
-    log?.(`[lns] greedy polish: ${polished.swaps} swap(s) in ${polished.passes} pass(es)`);
+    log?.(`[lns] greedy polish: ${polished.swaps} swap(s) + ${polished.threeCycles} 3-cycle(s) in ${polished.passes} pass(es)`);
   }
 
   log?.(`[lns] done: ${totalImprovements} improvements total; final energy=${Math.round(globalBestEnergy).toLocaleString("en-US")}`);
@@ -210,8 +210,9 @@ async function runOneRestart(seed: Layout, iterations: number, opts: LnsOptions)
 }
 
 // Try every (i,j) cell pair and accept any swap that strictly lowers energy.
-// Repeats until a full pass finds nothing to improve.
-function greedyPolish(layout: Layout): { passes: number; swaps: number } {
+// Then try 3-cycles among geographically close triples. Repeat until no
+// improvement is found in a full pass.
+function greedyPolish(layout: Layout): { passes: number; swaps: number; threeCycles: number } {
   // Collect swappable cell coordinates (those with no allowedRoomIds
   // restriction, or with multiple allowed roomIds).
   const swappable: Array<{ i: number; j: number }> = [];
@@ -222,15 +223,17 @@ function greedyPolish(layout: Layout): { passes: number; swaps: number } {
       swappable.push({ i, j });
     }
   }
-  if (swappable.length < 2) return { passes: 0, swaps: 0 };
+  if (swappable.length < 2) return { passes: 0, swaps: 0, threeCycles: 0 };
 
   let totalSwaps = 0;
+  let totalThreeCycles = 0;
   let passes = 0;
   let improved = true;
   while (improved && passes < 8) {
     improved = false;
     passes += 1;
     let currentEnergy = computeCost(layout).energy.total;
+    // --- Pass A: 2-swap until no pairwise improvement ---
     for (let p = 0; p < swappable.length; p += 1) {
       for (let q = p + 1; q < swappable.length; q += 1) {
         const a = swappable[p];
@@ -255,8 +258,71 @@ function greedyPolish(layout: Layout): { passes: number; swaps: number } {
         }
       }
     }
+    // --- Pass B: 3-cycle moves on geographically-close triples ---
+    // Triples whose 3 cells lie within manhattan diameter 4 of each other.
+    // Bounded so we don't pay O(N³) on the full grid.
+    const TRIPLE_DIAMETER = 4;
+    for (let p = 0; p < swappable.length; p += 1) {
+      for (let q = p + 1; q < swappable.length; q += 1) {
+        const a = swappable[p];
+        const b = swappable[q];
+        if (Math.abs(a.i - b.i) + Math.abs(a.j - b.j) > TRIPLE_DIAMETER) continue;
+        for (let r = q + 1; r < swappable.length; r += 1) {
+          const c = swappable[r];
+          if (Math.abs(a.i - c.i) + Math.abs(a.j - c.j) > TRIPLE_DIAMETER) continue;
+          if (Math.abs(b.i - c.i) + Math.abs(b.j - c.j) > TRIPLE_DIAMETER) continue;
+          const cellA = layout.cells[a.i][a.j];
+          const cellB = layout.cells[b.i][b.j];
+          const cellC = layout.cells[c.i][c.j];
+          const rA = cellA.roomId;
+          const rB = cellB.roomId;
+          const rC = cellC.roomId;
+          if (rA === rB || rB === rC || rA === rC) continue;
+          // Try cycle 1: A←rC, B←rA, C←rB
+          if (
+            (rC === null || !cellA.allowedRoomIds || cellA.allowedRoomIds.includes(rC)) &&
+            (rA === null || !cellB.allowedRoomIds || cellB.allowedRoomIds.includes(rA)) &&
+            (rB === null || !cellC.allowedRoomIds || cellC.allowedRoomIds.includes(rB))
+          ) {
+            cellA.roomId = rC;
+            cellB.roomId = rA;
+            cellC.roomId = rB;
+            const newEnergy = computeCost(layout).energy.total;
+            if (newEnergy < currentEnergy) {
+              currentEnergy = newEnergy;
+              totalThreeCycles += 1;
+              improved = true;
+              continue;
+            }
+            cellA.roomId = rA;
+            cellB.roomId = rB;
+            cellC.roomId = rC;
+          }
+          // Try cycle 2: A←rB, B←rC, C←rA
+          if (
+            (rB === null || !cellA.allowedRoomIds || cellA.allowedRoomIds.includes(rB)) &&
+            (rC === null || !cellB.allowedRoomIds || cellB.allowedRoomIds.includes(rC)) &&
+            (rA === null || !cellC.allowedRoomIds || cellC.allowedRoomIds.includes(rA))
+          ) {
+            cellA.roomId = rB;
+            cellB.roomId = rC;
+            cellC.roomId = rA;
+            const newEnergy = computeCost(layout).energy.total;
+            if (newEnergy < currentEnergy) {
+              currentEnergy = newEnergy;
+              totalThreeCycles += 1;
+              improved = true;
+              continue;
+            }
+            cellA.roomId = rA;
+            cellB.roomId = rB;
+            cellC.roomId = rC;
+          }
+        }
+      }
+    }
   }
-  return { passes, swaps: totalSwaps };
+  return { passes, swaps: totalSwaps, threeCycles: totalThreeCycles };
 }
 
 // --- Destroy helpers ---------------------------------------------------------
